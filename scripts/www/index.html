@@ -1,11 +1,264 @@
 <!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>PakePlus</title>
-    </head>
-    <body>
-        PakePlus
-    </body>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>大屋监控历史记录 - 紧凑版</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { 
+            font-family: 'PingFang SC', 'Helvetica Neue', sans-serif; 
+            background: #f0f2f5; 
+            padding: 8px; 
+            margin: 0;
+            display: flex;
+            justify-content: center;
+        }
+        .container { 
+            width: 100%;
+            max-width: 100%; 
+            margin: auto; 
+            background: white; 
+            padding: 12px; 
+            border-radius: 12px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
+            box-sizing: border-box;
+            position: relative;
+            padding-bottom: 30px; 
+        }
+        h2 { 
+            color: #1a73e8; 
+            border-bottom: 2px solid #eef2f6; 
+            padding-bottom: 10px; 
+            margin-bottom: 15px; 
+            font-size: 1.2rem; 
+            text-align: center; /* 标题居中 */
+        }
+        
+        .controls { 
+            margin-bottom: 15px; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 8px; 
+        }
+        button { 
+            width: 100%; 
+            padding: 10px; 
+            background: #1a73e8; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            font-size: 0.95rem;
+        }
+        
+        .table-wrapper {
+            width: 100%;
+            overflow-x: hidden; 
+        }
+        
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            table-layout: fixed; 
+        }
+        th, td { 
+            border-bottom: 1px solid #edf2f7; 
+            padding: 10px 2px; 
+            text-align: center; 
+            font-size: 0.82rem; 
+            word-break: break-all;
+        }
+        th { background: #f8fafc; color: #64748b; font-weight: 600; }
+
+        .col-time { width: 28%; }
+        .col-tmp { width: 18%; }
+        .col-id { width: 14%; }
+        .col-change { width: 40%; }
+
+        #historyBody tr:nth-child(even) { background-color: #f9f9f9; } 
+
+        .cron-tag { color: #ff007f; font-weight: bold; font-size: 0.7em; display: block; margin-bottom: -2px; }
+        
+        .old-v { color: #94a3b8; text-decoration: line-through; font-size: 0.75em; }
+        .new-v { color: #2ecc71; font-weight: bold; }
+        .arrow { color: #cbd5e1; margin: 0 1px; font-size: 0.7em; }
+        
+        .id-badge { padding: 2px 4px; border-radius: 4px; color: white; font-size: 0.75em; }
+        .d1-bg { background: #f39c12; }
+        .d3-bg { background: #8e44ad; }
+        .status-info { font-size: 0.8em; color: #94a3b8; text-align: center; }
+
+        /* 版本号小字显示在右下角 */
+        #version-display {
+            position: absolute;
+            bottom: 5px;
+            right: 12px;
+            font-size: 10px;
+            color: #ccc;
+            user-select: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>大屋数据监控历史记录</h2>
+    <div class="controls">
+        <button onclick="requestHistory()">同步历史数据</button>
+        <div id="mqtt-status" class="status-info">正在连接服务器...</div>
+    </div>
+
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th class="col-time">时间</th>
+                    <th class="col-tmp">温度</th>
+                    <th class="col-id">设备</th>
+                    <th class="col-change">状态变更</th>
+                </tr>
+            </thead>
+            <tbody id="historyBody"></tbody>
+        </table>
+    </div>
+    <div id="version-display"></div>
+</div>
+
+<script>
+    // --- 自动升级与版本读取逻辑 ---
+    function checkUpdate() {
+        // 如果不在手机 APP 环境内
+        if(typeof plus === 'undefined') {
+            document.getElementById('version-display').innerText = "v -- (Web Mode)";
+            return;
+        }
+        
+        var server = "http://192.168.100.20/updata/app/monitor/version.json"; 
+        
+        // 自动读取当前 APP 安装包的版本号
+        plus.runtime.getProperty(plus.runtime.appid, function(inf) {
+            var clientVersion = inf.version;
+            
+            // 动态显示版本号
+            document.getElementById('version-display').innerText = "v" + clientVersion;
+            
+            // 后台检测更新
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState == 4 && xhr.status == 200) {
+                    try {
+                        var res = JSON.parse(xhr.responseText);
+                        // 比对服务器版本与本地自动读取的版本
+                        if (res.version && res.version !== clientVersion) {
+                            var downloadUrl = res.wgtUrl || res.url; 
+                            var dtask = plus.downloader.createDownload(downloadUrl, { filename: "_doc/update/" }, function(d, status) {
+                                if (status == 200) { 
+                                    plus.runtime.install(d.filename, { force: true }, function() { 
+                                        plus.runtime.restart(); 
+                                    }); 
+                                }
+                            });
+                            dtask.start(); 
+                        }
+                    } catch (e) {}
+                }
+            };
+            xhr.open('GET', server + "?t=" + new Date().getTime());
+            xhr.send();
+        });
+    }
+
+    // 页面加载 3 秒后执行（避免抢占启动资源）
+    window.onload = function() {
+        setTimeout(checkUpdate, 3000); 
+    };
+
+    // --- 原有 MQTT 业务逻辑 ---
+    const MQTT_WS_URL = 'ws://mqtt.wuye.press:8083/mqtt';
+    const TOPIC_HISTORY = 'sensor/esp/state/history_data';
+    const TOPIC_REQ = 'sensor/esp/input/history_req';
+
+    function isCronTime(dateTimeStr) {
+        if (!dateTimeStr || dateTimeStr.length < 19) return false;
+        const seconds = parseInt(dateTimeStr.substring(17, 19));
+        return seconds >= 0 && seconds <= 3; 
+    }
+
+    const client = mqtt.connect(MQTT_WS_URL, {
+        username: 'monitor',
+        password: '5yWV$wYh2DAhnetmuTSygX',
+        clientId: 'Web_Monitor_' + Math.random().toString(16).substr(2, 5)
+    });
+
+    let allData = [];
+
+    client.on('connect', () => {
+        document.getElementById('mqtt-status').innerText = "服务器已连接";
+        client.subscribe(TOPIC_HISTORY);
+    });
+
+    client.on('message', (topic, payload) => {
+        if (topic === TOPIC_HISTORY) {
+            const lines = payload.toString().trim().split('\n');
+            lines.forEach(line => {
+                try {
+                    const json = JSON.parse(line);
+                    if (!allData.some(item => item.dt === json.dt && item.id === json.id)) {
+                        allData.push(json);
+                    }
+                } catch(e) {}
+            });
+            allData.sort((a, b) => b.dt.localeCompare(a.dt));
+            renderTable();
+        }
+    });
+
+    function requestHistory() {
+        allData = [];
+        client.publish(TOPIC_REQ, 'get');
+        document.getElementById('mqtt-status').innerText = "正在请求数据...";
+    }
+
+    function translateMode(m) {
+        const ms = { 0: "自动", 1: "开启", 2: "关闭" };
+        return ms[m] || m;
+    }
+
+    function renderTable() {
+        const tbody = document.getElementById('historyBody');
+        tbody.innerHTML = '';
+
+        allData.forEach(item => {
+            const row = tbody.insertRow();
+            const timeCell = row.insertCell(0);
+            const cronPrefix = isCronTime(item.dt) ? `<span class="cron-tag">定时</span>` : "";
+            const shortDt = item.dt.substring(5); 
+            timeCell.innerHTML = cronPrefix + shortDt.replace(' ', '<br>');
+
+            row.insertCell(1).innerText = (item.tmp ? item.tmp.toFixed(1) : "--") + "°C";
+
+            const idCell = row.insertCell(2);
+            const badgeClass = (item.id === "D1") ? "d1-bg" : "d3-bg";
+            idCell.innerHTML = `<span class="id-badge ${badgeClass}">${item.id}</span>`;
+
+            const changeCell = row.insertCell(3);
+            let displayVal = "";
+
+            if (item.ov !== undefined && item.nv !== undefined) {
+                const oldS = (item.type === "M") ? translateMode(item.ov) : item.ov + "%";
+                const newS = (item.type === "M") ? translateMode(item.nv) : item.nv + "%";
+                displayVal = `<span class="old-v">${oldS}</span><span class="arrow">➔</span><br><span class="new-v">${newS}</span>`;
+            } else {
+                const m = translateMode(item.m !== undefined ? item.m : (item.id === "D1" ? item.d1m : item.d3m));
+                const p = (item.p !== undefined ? item.p : (item.id === "D1" ? item.d1p : item.d3p));
+                displayVal = `${m}<br>(${p !== undefined ? p : "0"}%)`;
+            }
+            changeCell.innerHTML = displayVal;
+        });
+        document.getElementById('mqtt-status').innerText = "共 " + allData.length + " 条记录";
+    }
+</script>
+</body>
 </html>
